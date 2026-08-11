@@ -1,117 +1,161 @@
-# rbp-pseudobind
+# rbp-pseudobind — druggable-pocket extractor for RNA-binding proteins (ProFSA-style)
 
-**PROFSA-style pseudo-ligand generator for RNA-binding proteins.**
+`rbp_pseudobind.py` finds the **pockets on an RNA-binding protein** — the patches of
+the protein surface that grip its RNA. **The protein is the target.** The goal is to
+locate the protein pockets that a small molecule could later occupy to block the
+protein–RNA interaction. Each RNA interface fragment is used only as a **probe that
+marks where a functional pocket sits on the protein** — the pseudo-ligand, exactly
+as ProFSA uses its peptide fragment.
 
-From real protein–RNA complexes, this tool manufactures training-ready test sets of
-drug-like, Lipinski-compliant small molecules that target the protein's RNA-binding
-sites — a data-augmentation engine for building models that drug RNA-binding proteins
-(i.e. disrupt protein–RNA interactions with small molecules).
+## Target vs. probe (read this first)
 
-## Why
+- **Target = the protein.** Every pocket the tool outputs is a set of *protein*
+  residues — the site on the protein where the RNA binds, i.e. the site you would
+  drug. This is what the tool extracts, characterizes, and hands downstream.
+- **Probe = the RNA fragment.** The short stretch of RNA is *not* the target. It is
+  a marker: wherever the protein contacts RNA, there is a functional pocket worth
+  drugging, and the fragment shows us where. We keep the fragment only to locate and
+  define the pocket.
 
-Experimentally-determined pocket–ligand complexes are scarce, which limits models
-that need interaction data. ProFSA (Gao et al., ICLR 2024, arXiv:2310.07229) solved
-this for generic pockets by **synthesizing** pseudo-ligand/pocket complexes from
-protein-only structures. `rbp-pseudobind` adapts that idea to **RNA-binding
-proteins**: it treats each protein↔RNA interface as a druggable pocket and generates
-50+ small-molecule pseudo-ligands per site, so a scarce set of real complexes becomes
-a large labelled dataset.
+We are targeting the protein that binds the RNA — not the RNA.
 
-## How it works
+## Why (the ProFSA idea, applied to RNA-binding proteins)
 
-1. **Fetch** protein–RNA complexes (RCSB by PDB ID, or local `.cif`).
-2. **Freeze non-RNA entities** — only standard amino acids and standard RNA
-   nucleotides (A/U/G/C) are used. Metal ions, cofactors, bound small-molecule
-   ligands, crystallization additives, and water are excluded from pocket and
-   ligand construction (recorded in `manifest.json → frozen_entities`) so a
-   protein's non-RNA functional pockets cannot skew the dataset.
-3. **Detect interfaces** — slide 1–4-nt fragments along each RNA chain; the
-   surrounding protein residues (heavy atom within a cutoff, default 6 Å) are the
-   pocket. One complex yields many sites. Overlapping sliding-window pockets are
-   collapsed by a **Jaccard residue-set redundancy filter** (`--jaccard`, default
-   0.7): a pocket is dropped if >70% of its residues match an already-kept pocket.
-4. **Fingerprint** each site's pharmacophore (H-bond donors/acceptors, cationic,
-   anionic, aromatic, hydrophobic residues; the RNA phosphate backbone is anionic).
-5. **Generate** small molecules by BRICS recombination of a curated drug-like
-   fragment pool (every molecule is novel), then select per site with two engines:
-   - **Engine A — pocket-complementary**: molecules whose features *complement* the
-     pocket (pocket donor→ligand acceptor, cation-rich pocket→anionic/acceptor
-     ligand, aromatic stacking, hydrophobic packing). It satisfies the same contacts
-     the RNA does **without** copying the RNA's own negative charge.
-   - **Engine B — RNA-fragment surrogate**: molecules that mimic the pharmacophore of
-     the interface nucleotide fragment plus its anionic backbone (the direct analog
-     of ProFSA's peptide fragment).
-6. **Filter** to Lipinski Ro5-compliant molecules; **package** per-site and combined
-   test sets (CSV + SDF) with full provenance.
+Experimentally determined pocket–ligand complexes are scarce, which limits
+large-scale pocket pretraining. **ProFSA** (Gao et al., ICLR 2024,
+arXiv:2310.07229) gets around this by mining abundant protein-only structures:
+it cuts a short **peptide fragment** out of a protein, treats that fragment as a
+"pseudo-ligand" probe, and defines the surrounding protein residues as the pocket —
+manufacturing millions of (pocket, fragment) pairs without needing a bound drug.
 
-**Pockets-only mode** (`--pockets-only`): run steps 1–4 to enumerate the
-non-redundant RNA-binding pockets and their pharmacophore profiles, writing
-`pockets_nonredundant.csv`, **without** generating any decoys.
+`rbp-pseudobind` applies the same idea to **RNA-binding proteins**, with the RNA
+interface fragment playing the role of ProFSA's peptide fragment. If anything the
+mapping is cleaner here: the probe (RNA) and the target (protein) are genuinely
+*different* molecules, so each fragment marks a real, functional binding interface
+on the protein we want to drug. From one protein–RNA complex we obtain many protein
+pockets — the raw material for characterizing, comparing, and later pretraining on
+these druggable sites.
 
-The two engines produce chemically distinct decoy sets (see `engine_chemspace.png`),
-which enriches the augmented dataset.
+**This is a pocket-extraction tool.** It does *not* generate drug-like small
+molecules — there is no molecule library, no BRICS recombination, and no
+Lipinski / Rule-of-Five drug-likeness filter. Those belong to a later phase; here we
+only extract the protein pockets and the RNA probe that marks each one, matching
+ProFSA directly.
+
+## What a "pocket" is here
+
+For each RNA-contact site the tool records:
+
+- **the pocket (the target)** — every *protein* residue with at least one heavy atom
+  within **6 Å** of the RNA fragment (the 6 Å heavy-atom cutoff follows
+  ProFSA / Uni-Mol). This residue set is the druggable site on the protein;
+- **a pharmacophore profile** of that pocket — counts of H-bond donors/acceptors,
+  cationic (Arg/Lys), anionic (Asp/Glu), aromatic, and hydrophobic residues, so
+  pockets can be compared and clustered;
+- **the RNA fragment (the probe)** — the contiguous run of 1–4 nucleotides that
+  marks the pocket, recorded so the site can be relocated in the structure.
+
+Short fragments are slid along each RNA chain to enumerate every contact site, so
+one complex yields many protein pockets.
+
+### Cleanup and de-duplication
+
+- **Non-RNA entities are frozen out.** Only standard amino acids and standard RNA
+  nucleotides are used. Metal ions, cofactors, bound small molecules,
+  crystallization additives, and water are excluded (and recorded in the manifest)
+  so non-RNA functional pockets can't skew the set.
+- **Redundant pockets are collapsed.** Overlapping sliding-window pockets are merged
+  by a Jaccard residue-set filter (`--jaccard`, default 0.7).
+- **Symmetry copies are collapsed (default on).** A crystal often contains several
+  copies of the same protein–RNA complex (e.g. chains A and B), so an identical
+  binding site is enumerated once per copy. By default the tool keeps one pocket per
+  unique site (same RNA fragment at the same position), retaining the best-resolved
+  copy. Pass `--keep-symmetry-copies` to keep every copy. *Example: 1M8Y has two
+  protein copies, so its 42 raw pockets collapse to **21 unique sites**; 1FXL has a
+  single copy and stays at **12**.*
+
+## The two example complexes
+
+The tool is validated on two well-characterized single-stranded-RNA-binding proteins.
+Both are X-ray structures with the RNA resolved in the binding groove:
+
+| PDB | Protein | RNA-binding module | RNA in the structure | What it is |
+|-----|---------|--------------------|----------------------|------------|
+| **1M8Y** | **Pumilio-1** (human PUM1) | PUF / Pumilio-homology domain | `5'-AUUGUACAUA-3'` (Nanos response element, NRE) | The textbook sequence-specific ssRNA reader: eight PUF repeats each recognize one base. Gives large, well-defined pockets. |
+| **1FXL** | **HuD** (ELAV-like neuronal antigen ELAVL4) | two tandem RRM domains | `5'-UUUUAUUUU-3'` (AU-rich element from c-fos mRNA) | Canonical RRM recognition of an AU-rich element; the classic model for AU-rich-element regulation. |
+
+Between them they cover the two dominant ssRNA-recognition folds (PUF repeats and
+RRMs), which is why they make a good pilot: different pocket shapes, different base
+preferences, both with unambiguous interfaces.
 
 ## Install
 
 ```bash
-conda create -n rbp -c conda-forge python=3.11 rdkit biotite freesasa numpy pandas requests
+conda create -n rbp -c conda-forge python=3.11 biotite numpy pandas requests
 conda activate rbp
-# or: pip install -r requirements.txt   (rdkit via pip wheels)
 ```
 
-## Usage
+## Run
+
+Extraction is the whole tool — just point it at one or more complexes:
 
 ```bash
-# From PDB IDs (downloads from RCSB)
-python rbp_pseudobind.py --pdb-ids 1M8Y,1FXL --out ./testsets
+# Extract protein pockets from the two example complexes
+python rbp_pseudobind.py --pdb-ids 1M8Y,1FXL --out ./pockets
 
-# From a list file (one PDB ID per line)
-python rbp_pseudobind.py --pdb-list rbp_pdbs.txt --out ./testsets
+# Your own structures (downloaded from RCSB by ID)
+python rbp_pseudobind.py --pdb-list mypdbs.txt --out ./pockets
 
-# From local structures
-python rbp_pseudobind.py --cif-dir ./my_structures --out ./testsets
-
-# Pockets only — enumerate non-redundant RNA-binding pockets, no decoy generation
-python rbp_pseudobind.py --pdb-ids 1M8Y,1FXL --pockets-only --out ./pockets
-
-# Tune: 50 molecules per engine (100/site), cap sites per complex, wider interface
-python rbp_pseudobind.py --pdb-ids 1M8Y --per-engine 50 --max-sites 10 --cutoff 6.5 --out ./testsets
+# Local .cif / .mmcif files (no network needed)
+python rbp_pseudobind.py --cif-dir ./my_structures --out ./pockets
 ```
 
-Key options: `--per-engine N` (molecules per engine per site; N×2 total),
-`--max-sites`, `--cutoff` (Å), `--jaccard` (pocket redundancy threshold; 1.0
-disables), `--pockets-only` (pockets, no decoys), `--lib-size`, `--seed`
-(reproducible), `--no-sdf` (faster).
+Structures are fetched from RCSB by PDB ID, so ID-based runs need internet access;
+`--cif-dir` runs entirely offline on local files.
 
-## Output (in `--out`)
+### Useful options
 
-| file | contents |
-|---|---|
-| `combined_testset.csv` | all pseudo-ligands, one row per molecule (SMILES + Ro5 properties + site provenance) |
-| `combined_testset.sdf` | unique molecules as 3D-embedded SDF with properties |
-| `per_site/<site_id>.csv` | one test set per RNA-binding site |
-| `sites_summary.csv` | one row per site (pocket size, residue list, pharmacophore features) |
-| `pockets_nonredundant.csv` | *(pockets-only mode)* one row per non-redundant pocket, with residue list + pharmacophore features |
-| `manifest.json` | run parameters + provenance, including `frozen_entities` per structure |
+| Flag | Meaning | Default |
+|------|---------|---------|
+| `--cutoff` | interface distance cutoff in Å (pocket = protein residues with a heavy atom within this of the RNA fragment) | 6.0 |
+| `--jaccard` | pocket redundancy threshold; drop pockets whose residue set overlaps a kept pocket above this Jaccard (1.0 disables) | 0.7 |
+| `--max-sites` | cap the number of pockets per complex | none |
+| `--out` | output directory | `./pockets` |
+| `--seed` | random seed (reproducibility) | 42 |
 
-Each row carries `site_id, pdb_id, rna_fragment, engine, rank, score, smiles`, plus
-`MW, logP, HBD, HBA, TPSA, RotB, ro5_violations, ro5_pass`.
+## Output
 
-## Next phase (docking validation)
+Written to `--out`:
 
-The generated candidates are pharmacophore-matched, not energy-placed. To add
-geometric fidelity, dock each site's molecules into the pocket (e.g. DiffDock) and
-keep only confidently-scored poses. This is a documented later phase, not in the
-current script.
+- **`pockets_nonredundant.csv`** — one row per protein pocket:
+  `pocket_id, pdb_id, rna_fragment, frag_start, n_pocket_res, pocket_residues`
+  (the pocket's protein residues as `chain:resid:name`, semicolon-separated), plus
+  the pharmacophore feature counts (`pocket_hbd`, `pocket_hba`, `pocket_cationic`, …).
+- **`manifest.json`** — run parameters, the ProFSA reference, and the list of
+  entities frozen out of each structure, for provenance.
 
-## Caveats
+Each row is a self-contained **protein pocket**: the listed protein residues are the
+druggable site, and the RNA fragment tells you where on the structure it is. Pull the
+atoms (by PDB ID + the listed residues) to render, cluster, or feed the pockets into
+downstream analysis or docking.
 
-- Pseudo-ligands are **decoys for augmentation**, not validated binders. As in ProFSA,
-  their value is teaching a model interaction patterns at scale; downstream validation
-  (docking, assays) is required before any experimental claim.
-- Pharmacophore features are assigned per residue/base at neutral pH; explicit
-  protonation/tautomer handling is not modelled.
-- Engine B surrogates approximate a nucleotide's base pharmacophore with drug-like
-  chemistry; they intentionally drift from the (large, charged) real nucleotide.
+## Relationship to ProFSA — what matches and what differs
 
-Inspired by ProFSA (Gao, Jia, Mo, Ni, Ma, Ma, Lan; ICLR 2024).
+| | ProFSA (the paper) | rbp-pseudobind |
+|---|---|---|
+| Target (what the pocket is on) | the protein | **the protein** ✅ same |
+| Probe (pseudo-ligand marking the pocket) | peptide fragment, used directly | **RNA interface fragment, used directly** ✅ same idea |
+| Pocket definition | protein residues with a heavy atom within 6 Å of the fragment | 6 Å heavy-atom cutoff ✅ same |
+| Fragment enumeration | many fragments slid along the chain → many pockets | slide 1–4-nt RNA fragments → many pockets ✅ same |
+| Fragment length | 1–8 residues | 1–4 nucleotides (RNA adaptation) |
+| Drug-molecule generation | none | **none** ✅ |
+
+ProFSA additionally pairs this data with a contrastive-pretraining objective and
+applies peptide-specific steps (long-range residue exclusion, N-/C-terminal capping)
+that don't apply to a separate RNA chain. `rbp-pseudobind` implements the
+**pocket / fragment extraction** half; model training is out of scope for this script.
+
+## Reference
+
+Gao, Jia, Mo, Ni, Ma, Ma, Lan. *ProFSA: Self-Supervised Pocket Pretraining via
+Protein Fragment-Surroundings Alignment.* ICLR 2024. arXiv:2310.07229.
