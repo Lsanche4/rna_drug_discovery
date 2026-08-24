@@ -268,14 +268,34 @@ def segment_sites(arr, frag_len=(1, 2, 3, 4), cutoff=6.0, min_pocket=4,
 # ----------------------------------------------------------------------------- #
 #  Per-complex driver
 # ----------------------------------------------------------------------------- #
+def _atoms_for_residues(arr, res_keys):
+    """Heavy-atom elements + XYZ coordinates for a set of (chain_id, res_id)
+    residues. Returns (atoms, coords): atoms is a list of element symbols
+    (e.g. ['C','C','N','O',...]); coords is an (N, 3) float list of XYZ in A.
+    This is the per-atom payload DrugCLIP-style pocket/ligand encoders need."""
+    heavy = arr[arr.element != "H"]
+    want = set((c, int(r)) for c, r in res_keys)
+    mask = np.array([(heavy.chain_id[i], int(heavy.res_id[i])) in want
+                     for i in range(heavy.array_length())])
+    sel = heavy[mask]
+    atoms = [str(e) for e in sel.element]
+    coords = [[round(float(x), 3) for x in xyz] for xyz in sel.coord]
+    return atoms, coords
+
+
 def process_complex(pdb_id=None, cif_path=None, cutoff=6.0,
                     redundancy="tanimoto", redundancy_max=0.7,
-                    max_sites=None, dedup_symmetry=True):
+                    max_sites=None, dedup_symmetry=True, emit_coords=False):
     """Extract non-redundant RNA-binding pockets from one complex. Returns
     (pocket_rows, n_pockets, frozen_entities). When dedup_symmetry is True (default),
     binding sites duplicated across symmetry copies (chains) are collapsed to one.
     redundancy selects the pocket-overlap filter: "tanimoto" (default) | "jaccard"
-    (pilot) | "none"."""
+    (pilot) | "none".
+
+    emit_coords=True adds per-atom 3D data to each row: pocket_atoms /
+    pocket_coordinates (the protein pocket) and frag_atoms / frag_coordinates
+    (the RNA pseudo-ligand). These are what a DrugCLIP-style encoder consumes;
+    the CSV pipeline leaves this False (coordinates don't fit a flat CSV)."""
     arr = load_structure(pdb_id=pdb_id, cif_path=cif_path)
     label = pdb_id or os.path.splitext(os.path.basename(cif_path))[0]
     frozen = report_frozen(arr)
@@ -288,13 +308,21 @@ def process_complex(pdb_id=None, cif_path=None, cutoff=6.0,
     rows = []
     for si, site in enumerate(sites):
         pocket_id = f"{label}_pk{si:02d}"
-        rows.append({"pocket_id": pocket_id, "pdb_id": label,
-                     "rna_fragment": site["seq"], "frag_start": site["frag_start"],
-                     "n_pocket_res": len(site["pocket_res"]),
-                     "pocket_residues": ";".join(
-                         f"{c}:{r}:{n}" for c, r, n in
-                         sorted(site["pocket_res"], key=lambda x: (x[0], x[1]))),
-                     **{f"pocket_{k}": v for k, v in site["pocket_feats"].items()}})
+        row = {"pocket_id": pocket_id, "pdb_id": label,
+               "rna_fragment": site["seq"], "frag_start": site["frag_start"],
+               "n_pocket_res": len(site["pocket_res"]),
+               "pocket_residues": ";".join(
+                   f"{c}:{r}:{n}" for c, r, n in
+                   sorted(site["pocket_res"], key=lambda x: (x[0], x[1]))),
+               **{f"pocket_{k}": v for k, v in site["pocket_feats"].items()}}
+        if emit_coords:
+            p_atoms, p_coords = _atoms_for_residues(
+                arr, [(c, r) for c, r, _ in site["pocket_res"]])
+            f_atoms, f_coords = _atoms_for_residues(
+                arr, [(c, r) for c, r, _ in site["rna_frag"]])
+            row.update({"pocket_atoms": p_atoms, "pocket_coordinates": p_coords,
+                        "frag_atoms": f_atoms, "frag_coordinates": f_coords})
+        rows.append(row)
     return rows, len(sites), frozen
 
 # ----------------------------------------------------------------------------- #
