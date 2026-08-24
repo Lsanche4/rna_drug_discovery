@@ -1,0 +1,25 @@
+{
+  "tool": "mass_production_RBPs",
+  "stage": "footprint",
+  "run_utc": "2026-08-24T17:48:55.284653+00:00",
+  "params": {
+    "cutoff": 6.0,
+    "redundancy": "tanimoto",
+    "redundancy_max": 0.98,
+    "frag_len": [
+      1,
+      2,
+      3,
+      4
+    ],
+    "min_pocket": 4,
+    "dedup_symmetry": true,
+    "max_protein_chains": 10
+  },
+  "n_entries": 4599,
+  "n_entries_with_pockets": 4548,
+  "n_pockets": 222255,
+  "n_failures": 0,
+  "engine": "rbp_pseudobind.py (pilot engine, unchanged structure)",
+  "inspired_by": "ProFSA (Gao et al., ICLR 2024, arXiv:2310.07229)"
+}
