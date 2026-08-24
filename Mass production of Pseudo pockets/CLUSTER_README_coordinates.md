@@ -25,10 +25,15 @@ the CSV).
 # 0. deps (extraction needs no GPU)
 pip install lmdb msgpack biotite numpy requests
 
-# 1. protein->UniProt map for the split (fast, ~a few min)
+# 1. (if rbp_entry_ids.json is missing) derive it DETERMINISTICALLY from the
+#    committed results -- never re-run a live RCSB search, which could return a
+#    different set today and silently change the dataset.
+python derive_entry_ids.py --results footprint_results.jsonl --out rbp_entry_ids.json
+
+# 2. protein->UniProt map for the split (fast, ~a few min)
 python fetch_uniprot_map.py --ids rbp_entry_ids.json --out pdb2uniprot.json
 
-# 2. build the coordinate LMDB (network-bound; resumable via progress jsonl)
+# 3. build the coordinate LMDB (network-bound; resumable via progress jsonl)
 python build_drugclip_lmdb.py \
     --ids rbp_entry_ids.json \
     --out rbp_drugclip.lmdb \
@@ -44,7 +49,10 @@ pdb_id             str    source PDB entry
 pocket_atoms       [str]  protein pocket heavy-atom elements
 pocket_coordinates [[f]]  (N,3) XYZ, angstrom
 atoms              [str]  RNA-fragment (pseudo-ligand) heavy-atom elements
-coordinates        [[f]]  (M,3) XYZ, angstrom
+coordinates        [[[f]]] conformer list [(M,3)] -- DrugCLIP samples one
+                          conformer (len == n_conformers), so this is a
+                          1-element list holding the single (M,3) array,
+                          NOT a bare (M,3)
 smi                str    RNA fragment sequence, e.g. "AUUU" (ligand id)
 label              int    1  (all rows are true pairs; DrugCLIP makes negatives
                               by in-batch shuffling — no negative rows stored)

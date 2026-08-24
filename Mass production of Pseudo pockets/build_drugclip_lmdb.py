@@ -20,7 +20,9 @@ RECORD SCHEMA (one LMDB value per pocket, msgpack/pickle dict):
     pocket_atoms      [str]  heavy-atom element symbols of the PROTEIN pocket
     pocket_coordinates [[f]] (N,3) XYZ of those atoms, A
     atoms             [str]  heavy-atom elements of the RNA fragment (pseudo-ligand)
-    coordinates       [[f]]  (M,3) XYZ of the fragment atoms, A
+    coordinates       [[[f]]] conformer list [(M,3)] -- DrugCLIP samples one
+                             conformer, so this is a 1-element list holding the
+                             single (M,3) fragment coordinate array, NOT a bare (M,3)
     smi               str    RNA fragment sequence as the ligand id (e.g. "AUUU")
     label             int    1 (all rows are true pocket-fragment pairs; DrugCLIP
                              draws negatives by in-batch shuffling, so no negative
@@ -69,8 +71,13 @@ def one(pid, cutoff, redundancy, redundancy_max):
                 recs.append({
                     "pocket": r["pocket_id"], "pdb_id": r["pdb_id"],
                     "pocket_atoms": r["pocket_atoms"],
+                    # pocket side is NEVER conformer-sampled -> flat (N,3)
                     "pocket_coordinates": r["pocket_coordinates"],
-                    "atoms": r["frag_atoms"], "coordinates": r["frag_coordinates"],
+                    "atoms": r["frag_atoms"],
+                    # mol/ligand side: DrugCLIP AffinityDataset samples a conformer
+                    # (len == n_conformers, then [idx] -> one (M,3) array), so the
+                    # RNA-fragment coords MUST be wrapped as a single-conformer list.
+                    "coordinates": [r["frag_coordinates"]],
                     "smi": r["rna_fragment"], "label": 1,
                 })
             return pid, recs, None
