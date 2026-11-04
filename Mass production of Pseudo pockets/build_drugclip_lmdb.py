@@ -42,6 +42,7 @@ USAGE (on the cluster)
 Requires: rbp_pseudobind.py (same dir), lmdb, msgpack, requests, biotite, numpy.
 """
 import os, sys, json, time, argparse, pickle
+import numpy as np
 from concurrent.futures import ThreadPoolExecutor, as_completed
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import rbp_pseudobind as pb
@@ -50,11 +51,11 @@ try:
     import lmdb
 except ImportError:
     sys.exit("pip install lmdb  (not found)")
-try:
-    import msgpack
-    def _dumps(o): return msgpack.packb(o, use_bin_type=True)
-except ImportError:
-    def _dumps(o): return pickle.dumps(o)   # fallback; set --serializer pickle
+# unicore.data.LMDBDataset (used by every DrugCLIP task loader) does
+# pickle.loads() unconditionally -- no msgpack support, and msgpack can't
+# even serialize a numpy array without a custom encoder (confirmed live: this
+# raised TypeError: can not serialize 'numpy.ndarray' object). Always pickle.
+def _dumps(o): return pickle.dumps(o)
 
 
 def one(pid, cutoff, redundancy, redundancy_max):
@@ -72,12 +73,12 @@ def one(pid, cutoff, redundancy, redundancy_max):
                     "pocket": r["pocket_id"], "pdb_id": r["pdb_id"],
                     "pocket_atoms": r["pocket_atoms"],
                     # pocket side is NEVER conformer-sampled -> flat (N,3)
-                    "pocket_coordinates": r["pocket_coordinates"],
+                    "pocket_coordinates": np.array(r["pocket_coordinates"], dtype=np.float32),
                     "atoms": r["frag_atoms"],
                     # mol/ligand side: DrugCLIP AffinityDataset samples a conformer
                     # (len == n_conformers, then [idx] -> one (M,3) array), so the
                     # RNA-fragment coords MUST be wrapped as a single-conformer list.
-                    "coordinates": [r["frag_coordinates"]],
+                    "coordinates": [np.array(r["frag_coordinates"], dtype=np.float32)],  # ndarray required: AffinityDataset calls .astype() on coordinates[idx] directly
                     "smi": r["rna_fragment"], "label": 1,
                 })
             return pid, recs, None
@@ -112,7 +113,7 @@ def main():
     todo = [i for i in ids if i not in done]
     print(f"entries total={len(ids)} done={len(done)} todo={len(todo)}", flush=True)
 
-    env = lmdb.open(args.out, map_size=int(args.map_size_gb * (1 << 30)))
+    env = lmdb.open(args.out, subdir=False, map_size=int(args.map_size_gb * (1 << 30)))  # flat-file LMDB: unicore.data.LMDBDataset requires subdir=False
     n_pockets, n_fail, t0 = 0, 0, time.time()
     with open(args.progress_jsonl, "a") as plog, \
          ThreadPoolExecutor(max_workers=args.workers) as ex:
